@@ -256,37 +256,33 @@ uint32_t NtSignalAndWaitForSingleObjectEx(uint32_t signalHandle, uint32_t waitHa
 
 // ---- Delays --------------------------------------------------------------------
 
-uint32_t KeDelayExecutionThread(uint32_t waitMode, uint32_t alertable, be<int64_t>* interval)
+inline void BackoffZeroDelay()
+{
+    guesttime::WaitWhileSuspended();
+
+    static const bool backOff = [] { const char* v = std::getenv("NFSMW_SLEEP0_BACKOFF"); return !v || v[0] != '0'; }();
+
+    if (backOff)
+    {
+#ifdef __APPLE__
+        // 0.1 ms wakeups
+        struct timespec req{ 0, 100'000 };
+        nanosleep(&req, nullptr);
+#else
+        hostcpu::TightenTimerSlack();
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+#endif
+        return;
+    }
+    std::this_thread::yield(); //FIXED
+}
+
+uint32_t KeDelayExecutionThread(uint32_t waitMode, uint32_t alertable, const be<int64_t>* interval)
 {
     auto deadline = Deadline(interval);
     if (!deadline || *deadline <= guesttime::NowNs())
     {
-        // While the game is suspended a polling loop would spin through it
-        // (no guest time passes, so what it polls for can't come): park.
-        guesttime::WaitWhileSuspended();
-
-        // Sleep(0) polling loops: one game thread (g2) spent ~90% of a core
-        // in them, 60% of it in sched_yield, and kept one of the Steam
-        // Machine's two fast cores (see hostcpu::ReserveFastCore). After 1 ms
-        // of back-to-back zero delays each one sleeps 100 us instead (a new
-        // poll starts exact). Linux only: macOS coalesces default-QoS timers
-        // to ~10 ms. NFSMW_SLEEP0_BACKOFF=0 always yields.
-#ifdef __linux__
-        static const bool backOff = [] { const char* v = std::getenv("NFSMW_SLEEP0_BACKOFF"); return !v || v[0] != '0'; }();
-        thread_local Clock::time_point firstZero{}, lastZero{};
-        auto now = Clock::now();
-        if (now - lastZero > std::chrono::microseconds(300))
-            firstZero = now;
-        lastZero = now;
-        if (backOff && now - firstZero > std::chrono::milliseconds(1))
-        {
-            hostcpu::TightenTimerSlack();
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
-            lastZero = Clock::now();
-            return STATUS_SUCCESS;
-        }
-#endif
-        std::this_thread::yield();
+        BackoffZeroDelay();
     }
     else
         guesttime::SleepUntil(*deadline);  // longer by any suspension
@@ -295,8 +291,7 @@ uint32_t KeDelayExecutionThread(uint32_t waitMode, uint32_t alertable, be<int64_
 
 uint32_t NtYieldExecution()
 {
-    guesttime::WaitWhileSuspended();  // as KeDelayExecutionThread's polls
-    std::this_thread::yield();
+    BackoffZeroDelay();
     return STATUS_SUCCESS;
 }
 

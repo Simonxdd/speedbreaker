@@ -26,7 +26,7 @@ namespace
     // processor's Worker). NFSMW_GPU_WAIT_BACKOFF=0 spins throughout.
     void BackOff()
     {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
         static const bool backOff = [] { const char* v = std::getenv("NFSMW_GPU_WAIT_BACKOFF"); return !v || v[0] != '0'; }();
         if (!backOff)
             return;
@@ -38,10 +38,16 @@ namespace
         lastPoll = now;
         if (now - waitStart < std::chrono::microseconds(20))
             return;
+#ifdef __linux__
         hostcpu::TightenTimerSlack();
         std::this_thread::sleep_for(std::chrono::microseconds(50));
+#elif defined(__APPLE__)
+        struct timespec req{ 0, 100'000 }; // 0.1 ms wakeups
+        nanosleep(&req, nullptr);
+#endif
         lastPoll = Clock::now();
 #endif
+
     }
 }
 
