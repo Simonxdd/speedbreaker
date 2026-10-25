@@ -130,6 +130,7 @@ namespace ui
 
     void OpenSettings();
     void CloseSettings();  // saves any change
+    bool isSettingsOpen();
     bool SettingsOpen();
 
     // Screens (settings_menu.cpp, perf_overlay.cpp, installer_screen.cpp).

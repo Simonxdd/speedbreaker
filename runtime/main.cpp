@@ -57,6 +57,10 @@
 extern std::unordered_map<size_t, const char*> XamExports;
 extern std::unordered_map<size_t, const char*> XboxKernelExports;
 
+#if defined(__APPLE__) && TARGET_OS_OSX
+extern "C" void SetupMacMenuBar();
+#endif
+
 Memory g_memory;
 
 namespace
@@ -423,6 +427,12 @@ int main(int argc, char** argv)
         fprintf(stderr, "[version] v%s (the last version isn't known: settings.toml didn't load)\n", report::Version());
     // The window must live on the main thread (macOS); the game gets its own.
     bool windowed = video::Initialize();
+    if (windowed)
+    {
+#if defined(__APPLE__) && TARGET_OS_OSX
+        SetupMacMenuBar();
+#endif
+    }
     if (!settingsLoaded)
         ui::Toast(settings::LastError(), 12.0);  // a mistake in settings.toml: it was kept as .bad
     if (portableError)

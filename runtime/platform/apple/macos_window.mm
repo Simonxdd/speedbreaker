@@ -1,22 +1,190 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See ../macos_window.h.
-//
-// macOS only (AppKit); built for iOS too, as every platform/apple/*.mm is,
-// where it is empty. Manual reference counting like the rest of the runtime.
-#include <TargetConditionals.h>
-
-#if TARGET_OS_OSX
-#include <platform/macos_window.h>
-
+#import <TargetConditionals.h>
 #import <AppKit/AppKit.h>
 #include <cmath>
 #include <SDL3/SDL.h>
 
+#include <platform/macos_window.h>
+
+namespace ui
+{
+    void OpenSettings();
+    void CloseSettings();
+    bool IsSettingsOpen();
+}
+
+struct MenuEnumEntry {
+    double value;
+    char label[64];
+    bool selected;
+};
+
+struct MenuOptionInfo {
+    int id;
+    const char* label;
+    int type;
+    char currentValue[64];
+    int entryCount;
+    MenuEnumEntry entries[16];
+};
+
+extern "C" {
+    int UiGetCategoryCount();
+    const char* UiGetCategoryName(int catIndex);
+    void UiToggleOption(int optionId);
+    void UiSetOptionValue(int optionId, double value);
+    bool UiGetOptionState(int optionId);
+    int UiGetOptionsForCategory(int catIndex, MenuOptionInfo* outBuffer, int maxCount);
+}
+
+@interface SpeedBreakerMenuDelegate : NSObject <NSMenuDelegate>
+@property (nonatomic, assign) int categoryIndex;
+@end
+
+@implementation SpeedBreakerMenuDelegate
+- (void)handleMenuAction:(NSMenuItem *)sender {
+    NSInteger tag = sender.tag;
+    if (tag == 999) {
+        if (ui::IsSettingsOpen()) {
+            ui::CloseSettings();
+        } else {
+            ui::OpenSettings();
+        }
+    } else {
+        UiToggleOption((int)tag);
+    }
+}
+
+- (void)handleEnumChoiceAction:(NSMenuItem *)sender {
+    NSDictionary *info = sender.representedObject;
+    if (info) {
+        int optId = [info[@"optId"] intValue];
+        double val = [info[@"value"] doubleValue];
+        UiSetOptionValue(optId, val);
+    }
+}
+
+- (void)menuWillOpen:(NSMenu *)menu {
+    if (self.categoryIndex < 0)
+        return;
+
+    [menu removeAllItems];
+
+    MenuOptionInfo optionsBuf[64];
+    int optCount = UiGetOptionsForCategory(self.categoryIndex, optionsBuf, 64);
+
+    if (optCount > 0) {
+        for (int j = 0; j < optCount; j++) {
+            NSString *optLabel = [NSString stringWithUTF8String:optionsBuf[j].label];
+            NSString *valStr = [NSString stringWithUTF8String:optionsBuf[j].currentValue];
+
+            NSMenuItem *optItem = [[NSMenuItem alloc] init];
+            optItem.target = self;
+
+            if (optionsBuf[j].type == 0) { // Type::Bool
+                optItem.title = optLabel;
+                optItem.action = @selector(handleMenuAction:);
+                optItem.tag = optionsBuf[j].id;
+                optItem.state = UiGetOptionState(optionsBuf[j].id) ? NSControlStateValueOn : NSControlStateValueOff;
+            } else if (optionsBuf[j].entryCount > 0) { // Type::Enum / Choices
+                optItem.title = [NSString stringWithFormat:@"%@: %@", optLabel, valStr];
+                NSMenu *enumSub = [[NSMenu alloc] initWithTitle:optLabel];
+                for (int e = 0; e < optionsBuf[j].entryCount; e++) {
+                    NSString *eLabel = [NSString stringWithUTF8String:optionsBuf[j].entries[e].label];
+                    NSMenuItem *eItem = [[NSMenuItem alloc] initWithTitle:eLabel
+                                                                  action:@selector(handleEnumChoiceAction:)
+                                                           keyEquivalent:@""];
+                    eItem.target = self;
+                    eItem.state = optionsBuf[j].entries[e].selected ? NSControlStateValueOn : NSControlStateValueOff;
+                    eItem.representedObject = @{
+                        @"optId": @(optionsBuf[j].id),
+                        @"value": @(optionsBuf[j].entries[e].value)
+                    };
+                    [enumSub addItem:eItem];
+                    [eItem release];
+                }
+                [optItem setSubmenu:enumSub];
+                [enumSub release];
+            } else { // Sliders / Numeric
+                optItem.title = [NSString stringWithFormat:@"%@: %@", optLabel, valStr];
+                optItem.action = @selector(handleMenuAction:);
+                optItem.tag = optionsBuf[j].id;
+            }
+
+            [menu addItem:optItem];
+            [optItem release];
+        }
+    } else {
+        NSMenuItem *emptyItem = [[NSMenuItem alloc] initWithTitle:@"(No options)" action:nil keyEquivalent:@""];
+        [menu addItem:emptyItem];
+        [emptyItem release];
+    }
+}
+@end
+
+extern "C" void SetupMacMenuBar()
+{
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        NSMenu *mainMenu = app.mainMenu;
+        if (!mainMenu || [mainMenu itemWithTitle:@"Display"])
+            return;
+
+        NSInteger windowIndex = [mainMenu indexOfItemWithTitle:@"Window"];
+        if (windowIndex == -1)
+            windowIndex = mainMenu.numberOfItems;
+
+        // Overlay Toggle Menu
+        SpeedBreakerMenuDelegate *overlayDelegate = [[SpeedBreakerMenuDelegate alloc] init];
+        overlayDelegate.categoryIndex = -1;
+
+        NSMenuItem *overlayRoot = [[NSMenuItem alloc] initWithTitle:@"Overlay" action:nil keyEquivalent:@""];
+        NSMenu *overlaySub = [[NSMenu alloc] initWithTitle:@"Overlay"];
+        NSMenuItem *toggleItem = [[NSMenuItem alloc] initWithTitle:@"Toggle In-Game Settings (F1)"
+                                                            action:@selector(handleMenuAction:)
+                                                     keyEquivalent:@"1"];
+        toggleItem.target = overlayDelegate;
+        toggleItem.tag = 999;
+        [overlaySub addItem:toggleItem];
+        [toggleItem release];
+        [overlayRoot setSubmenu:overlaySub];
+        [overlaySub release];
+        [mainMenu insertItem:overlayRoot atIndex:windowIndex++];
+        [overlayRoot release];
+
+        // Categories (Display, Graphics, Audio, etc.)
+        int catCount = UiGetCategoryCount();
+        for (int i = 0; i < catCount; i++) {
+            const char* namePtr = UiGetCategoryName(i);
+            if (!namePtr) continue;
+
+            NSString *catName = [NSString stringWithUTF8String:namePtr];
+            NSMenuItem *catRoot = [[NSMenuItem alloc] initWithTitle:catName action:nil keyEquivalent:@""];
+
+            NSMenu *catSub = [[NSMenu alloc] initWithTitle:catName];
+            SpeedBreakerMenuDelegate *catDelegate = [[SpeedBreakerMenuDelegate alloc] init];
+            catDelegate.categoryIndex = i;
+            catSub.delegate = catDelegate;
+
+            NSMenuItem *placeholder = [[NSMenuItem alloc] initWithTitle:@"Loading..." action:nil keyEquivalent:@""];
+            [catSub addItem:placeholder];
+            [placeholder release];
+
+            [catRoot setSubmenu:catSub];
+            [catSub release];
+            [mainMenu insertItem:catRoot atIndex:windowIndex++];
+            [catRoot release];
+        }
+    }
+}
+
+#if TARGET_OS_OSX
 namespace platform::macos
 {
     namespace
     {
-        NSWindow* s_window = nil;      // the game's (SDL's, not retained here)
-        bool s_inTransition = false;   // between a fullscreen transition's "will" and its "did" (or "did fail")
+        NSWindow* s_window = nil;
+        bool s_inTransition = false;
         NSMutableArray* s_observers = nil;
 
         NSWindow* CocoaWindow(SDL_Window* window)
@@ -27,7 +195,6 @@ namespace platform::macos
                 nullptr);
         }
 
-        // No title, a transparent title bar, the picture under it.
         void ApplyLook(NSWindow* window)
         {
             window.titleVisibility = NSWindowTitleHidden;
@@ -47,24 +214,17 @@ namespace platform::macos
         NSWindow* w = CocoaWindow(window);
         if (!w)
             return;
+
         if (s_window != w)
         {
             ForgetWindow(nullptr);
             s_window = w;
             s_observers = [[NSMutableArray alloc] init];
-            // Whether a fullscreen transition is under way (AppKit says
-            // nothing else): the look is never changed in the middle of one.
             for (NSString* name in @[ NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification ])
                 Observe(w, name, ^(NSNotification*) { s_inTransition = true; });
             for (NSString* name in @[ NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
                      @"NSWindowDidFailToEnterFullScreenNotification", @"NSWindowDidFailToExitFullScreenNotification" ])
                 Observe(w, name, ^(NSNotification*) { s_inTransition = false; });
-            // SDL takes the full-size content view off as a fullscreen
-            // transition starts (its windowWillEnterFullScreen), but its
-            // timing against AppKit's own steps varies, and the bit changing
-            // after AppKit has set its fullscreen frame crashed AppKit. So it
-            // goes now, as AppKit announces the transition. (In testing SDL
-            // had always taken it off already; this is the safety net.)
             Observe(w, NSWindowWillEnterFullScreenNotification, ^(NSNotification* n) {
                 NSWindow* nw = n.object;
                 if (nw.styleMask & NSWindowStyleMaskFullSizeContentView)
@@ -80,10 +240,6 @@ namespace platform::macos
         NSWindow* w = CocoaWindow(window);
         if (!w || s_inTransition || (w.styleMask & NSWindowStyleMaskFullScreen))
             return false;
-        // AppKit has put back the frame the window had before fullscreen;
-        // -setStyleMask: would keep the content (one title bar shorter
-        // without the bit) and shrink the frame to it, so the frame is set
-        // back: the content is the whole frame again, as before fullscreen.
         const NSRect frame = w.frame;
         ApplyLook(w);
         [w setFrame:frame display:YES];
@@ -109,7 +265,6 @@ namespace platform::macos
         NSWindow* w = CocoaWindow(window);
         if (!w || (w.styleMask & NSWindowStyleMaskFullScreen) || !(w.styleMask & NSWindowStyleMaskFullSizeContentView))
             return 0.0f;
-        // The layout rect is the part of the window no title bar covers.
         const CGFloat strip = NSHeight(w.frame) - NSMaxY(w.contentLayoutRect);
         return strip > 0 ? float(strip) : 0.0f;
     }
