@@ -1201,6 +1201,12 @@ namespace ui
         XamNotifySystemUi(true);
     }
 
+    bool IsSettingsOpen()
+        {
+            return s_settingsOpen;
+        }
+
+
     void CloseSettings()
     {
         if (!s_settingsOpen)
@@ -1280,5 +1286,93 @@ namespace ui
     void ButtonRowAtBottom()
     {
         ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - ImGui::GetFrameHeight()));
+    }
+}
+struct MenuEnumEntry {
+    double value;
+    char label[64];
+    bool selected;
+};
+
+struct MenuOptionInfo {
+    int id;
+    const char* label;
+    int type;
+    char currentValue[64];
+    int entryCount;
+    MenuEnumEntry entries[16];
+};
+
+extern "C" {
+    int UiGetCategoryCount() {
+        return 6; // Display, Graphics, Audio, Input, Controls, Advanced
+    }
+
+    const char* UiGetCategoryName(int catIndex) {
+        static const char* categories[] = { "Display", "Graphics", "Audio", "Input", "Controls", "Advanced" };
+        if (catIndex >= 0 && catIndex < 6)
+            return categories[catIndex];
+        return nullptr;
+    }
+
+    int UiGetOptionsForCategory(int catIndex, MenuOptionInfo* outBuffer, int maxCount) {
+        settings::Category cat = static_cast<settings::Category>(catIndex);
+        int count = 0;
+        for (const auto& opt : settings::Options()) {
+            if (opt.category == cat && !opt.hidden) {
+                if (outBuffer && count < maxCount) {
+                    // Use GetStoredValue to fetch the current value
+                    double currentVal = settings::GetStoredValue(opt.id);
+                    std::string valStr = settings::FormatValue(opt.id, currentVal);
+
+                    MenuOptionInfo info{};
+                    info.id = static_cast<int>(opt.id);
+                    info.label = opt.label;
+                    info.type = static_cast<int>(opt.type);
+                    std::snprintf(info.currentValue, sizeof(info.currentValue), "%s", valStr.c_str());
+
+                    if (opt.type == settings::Type::Enum) {
+                        int eCount = 0;
+                        for (const auto& entry : opt.entries) {
+                            if (eCount < 16) {
+                                info.entries[eCount].value = entry.value;
+                                // entry.label is already a const char* or string-compatible field
+                                std::snprintf(info.entries[eCount].label, sizeof(info.entries[eCount].label), "%s", entry.label);
+                                info.entries[eCount].selected = (entry.value == currentVal);
+                                eCount++;
+                            }
+                        }
+                        info.entryCount = eCount;
+                    }
+
+                    outBuffer[count] = info;
+                }
+                count++;
+            }
+        }
+        return count;
+    }
+
+    void UiToggleOption(int optionId) {
+        settings::Id id = static_cast<settings::Id>(optionId);
+        const settings::Option& opt = settings::Info(id);
+        double stored = settings::GetStoredValue(id);
+
+        if (opt.type == settings::Type::Bool) {
+            double next = stored == 0.0 ? 1.0 : 0.0;
+            settings::Set(id, next);
+        } else {
+            ui::OpenSettings();
+        }
+    }
+
+    void UiSetOptionValue(int optionId, double value) {
+        settings::Id id = static_cast<settings::Id>(optionId);
+        settings::Set(id, value);
+    }
+
+    bool UiGetOptionState(int optionId) {
+        settings::Id id = static_cast<settings::Id>(optionId);
+        return settings::GetStoredValue(id) != 0.0;
     }
 }
