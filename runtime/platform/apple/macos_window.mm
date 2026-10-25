@@ -64,7 +64,6 @@ extern "C" {
     }
 }
 
-// Dynamically refresh items and checkmarks every time the menu is opened
 - (void)menuWillOpen:(NSMenu *)menu {
     if (self.categoryIndex < 0)
         return;
@@ -167,7 +166,6 @@ extern "C" void SetupMacMenuBar()
             catDelegate.categoryIndex = i;
             catSub.delegate = catDelegate;
 
-            // Add a temporary placeholder item so macOS knows it has a submenu
             NSMenuItem *placeholder = [[NSMenuItem alloc] initWithTitle:@"Loading..." action:nil keyEquivalent:@""];
             [catSub addItem:placeholder];
             [placeholder release];
@@ -183,11 +181,119 @@ extern "C" void SetupMacMenuBar()
 #if TARGET_OS_OSX
 namespace platform::macos
 {
-    void ConfigureWindow(SDL_Window*, bool) {}
-    bool RestoreAfterFullscreen(SDL_Window*) { return false; }
-    void ShowWindowButtons(SDL_Window*, bool) {}
-    float TitleStripHeight(SDL_Window*) { return 0.0f; }
-    bool DisplayRefreshFixed(SDL_Window*, double*, double*) { return false; }
-    void ForgetWindow(SDL_Window*) {}
+    namespace
+    {
+        NSWindow* s_window = nil;
+        bool s_inTransition = false;
+        NSMutableArray* s_observers = nil;
+
+        NSWindow* CocoaWindow(SDL_Window* window)
+        {
+            if (!window)
+                return nil;
+            return (__bridge NSWindow*)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
+                nullptr);
+        }
+
+        void ApplyLook(NSWindow* window)
+        {
+            window.titleVisibility = NSWindowTitleHidden;
+            window.titlebarAppearsTransparent = YES;
+            window.styleMask |= NSWindowStyleMaskFullSizeContentView;
+        }
+
+        void Observe(NSWindow* window, NSString* name, void (^block)(NSNotification*))
+        {
+            id token = [NSNotificationCenter.defaultCenter addObserverForName:name object:window queue:nil usingBlock:block];
+            [s_observers addObject:token];
+        }
+    }
+
+    void ConfigureWindow(SDL_Window* window, bool windowed)
+    {
+        NSWindow* w = CocoaWindow(window);
+        if (!w)
+            return;
+
+        if (s_window != w)
+        {
+            ForgetWindow(nullptr);
+            s_window = w;
+            s_observers = [[NSMutableArray alloc] init];
+            for (NSString* name in @[ NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification ])
+                Observe(w, name, ^(NSNotification*) { s_inTransition = true; });
+            for (NSString* name in @[ NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
+                     @"NSWindowDidFailToEnterFullScreenNotification", @"NSWindowDidFailToExitFullScreenNotification" ])
+                Observe(w, name, ^(NSNotification*) { s_inTransition = false; });
+            Observe(w, NSWindowWillEnterFullScreenNotification, ^(NSNotification* n) {
+                NSWindow* nw = n.object;
+                if (nw.styleMask & NSWindowStyleMaskFullSizeContentView)
+                    nw.styleMask &= ~NSWindowStyleMaskFullSizeContentView;
+            });
+        }
+        if (windowed)
+            ApplyLook(w);
+    }
+
+    bool RestoreAfterFullscreen(SDL_Window* window)
+    {
+        NSWindow* w = CocoaWindow(window);
+        if (!w || s_inTransition || (w.styleMask & NSWindowStyleMaskFullScreen))
+            return false;
+        const NSRect frame = w.frame;
+        ApplyLook(w);
+        [w setFrame:frame display:YES];
+        return true;
+    }
+
+    void ShowWindowButtons(SDL_Window* window, bool shown)
+    {
+        NSWindow* w = CocoaWindow(window);
+        if (!w)
+            return;
+        const NSWindowButton buttons[] = { NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton };
+        for (NSWindowButton b : buttons)
+        {
+            NSButton* button = [w standardWindowButton:b];
+            if (button && button.hidden == shown)
+                button.hidden = !shown;
+        }
+    }
+
+    float TitleStripHeight(SDL_Window* window)
+    {
+        NSWindow* w = CocoaWindow(window);
+        if (!w || (w.styleMask & NSWindowStyleMaskFullScreen) || !(w.styleMask & NSWindowStyleMaskFullSizeContentView))
+            return 0.0f;
+        const CGFloat strip = NSHeight(w.frame) - NSMaxY(w.contentLayoutRect);
+        return strip > 0 ? float(strip) : 0.0f;
+    }
+
+    bool DisplayRefreshFixed(SDL_Window* window, double* minHz, double* maxHz)
+    {
+        NSWindow* w = CocoaWindow(window);
+        NSScreen* screen = w ? w.screen : nil;
+        if (!screen)
+            return false;
+        const NSTimeInterval shortest = screen.minimumRefreshInterval, longest = screen.maximumRefreshInterval;
+        if (minHz)
+            *minHz = longest > 0 ? 1.0 / longest : 0.0;
+        if (maxHz)
+            *maxHz = shortest > 0 ? 1.0 / shortest : 0.0;
+        NSNumber* number = screen.deviceDescription[@"NSScreenNumber"];
+        if (number && CGDisplayIsBuiltin(CGDirectDisplayID(number.unsignedIntValue)))
+            return false;
+        return shortest > 0 && longest > 0 && std::abs(longest - shortest) <= 0.01 * shortest;
+    }
+
+    void ForgetWindow(SDL_Window*)
+    {
+        for (id token in s_observers)
+            [NSNotificationCenter.defaultCenter removeObserver:token];
+        [s_observers release];
+        s_observers = nil;
+        s_window = nil;
+        s_inTransition = false;
+    }
 }
 #endif
