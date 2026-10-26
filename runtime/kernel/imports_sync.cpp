@@ -9,6 +9,20 @@
 #include <cpu/guest_time.h>
 #include <cpu/host_cpu.h>
 
+namespace kernel_sync {
+    inline std::mutex& GetMutex() {
+        static std::mutex m;
+        return m;
+    }
+    inline std::condition_variable& GetCV() {
+        static std::condition_variable cv;
+        return cv;
+    }
+    inline void WakeAllYielded() {
+        GetCV().notify_all();
+    }
+}
+
 using namespace dispatcher;
 
 namespace
@@ -58,6 +72,7 @@ uint32_t NtCreateEvent(be<uint32_t>* handle, XOBJECT_ATTRIBUTES* attributes, uin
 uint32_t KeSetEvent(XKEVENT* event, uint32_t increment, uint32_t wait)
 {
     return static_cast<EventObject*>(BindDispatcherHeader(*event))->Set();
+    kernel_sync::WakeAllYielded();
 }
 
 uint32_t KeResetEvent(XKEVENT* event)
@@ -78,6 +93,7 @@ uint32_t NtSetEvent(uint32_t handle, be<uint32_t>* previousState)
     bool previous = e->Set();
     if (previousState)
         *previousState = previous;
+    kernel_sync::WakeAllYielded();
     return STATUS_SUCCESS;
 }
 
@@ -119,6 +135,7 @@ uint32_t KeReleaseSemaphore(XKSEMAPHORE* semaphore, uint32_t increment, uint32_t
     auto* s = static_cast<SemaphoreObject*>(BindDispatcherHeader(semaphore->Header));
     uint32_t status = s->Release(int32_t(adjustment), &previous);
     assert(status == STATUS_SUCCESS && "KeReleaseSemaphore past its limit");
+    kernel_sync::WakeAllYielded();
     return uint32_t(previous);
 }
 
@@ -138,6 +155,7 @@ uint32_t NtReleaseSemaphore(uint32_t handle, uint32_t releaseCount, be<uint32_t>
     uint32_t status = s->Release(int32_t(releaseCount), &previous);
     if (previousCount)
         *previousCount = uint32_t(previous);
+    kernel_sync::WakeAllYielded();
     return status;
 }
 
@@ -158,6 +176,7 @@ uint32_t NtReleaseMutant(uint32_t handle, be<uint32_t>* previousCount)
     int32_t previous = 0;
     uint32_t status = m->Release(&previous);
     // Xenia notes the second argument is unused by titles it has seen.
+    kernel_sync::WakeAllYielded();
     return status;
 }
 
@@ -264,17 +283,18 @@ inline void BackoffZeroDelay()
 
     if (backOff)
     {
-#ifdef __APPLE__
-        // 0.1 ms wakeups
-        struct timespec req{ 0, 100'000 };
-        nanosleep(&req, nullptr);
+#if defined(__APPLE__) || defined(__linux__)
+        // True Event-Driven Yield: Park the thread until a kernel synchronization
+        // object fires, or hit a 2ms safety timeout. This allows P-cores to idle.
+        std::unique_lock<std::mutex> lock(kernel_sync::GetMutex());
+        kernel_sync::GetCV().wait_for(lock, std::chrono::milliseconds(2));
 #else
         hostcpu::TightenTimerSlack();
         std::this_thread::sleep_for(std::chrono::microseconds(500));
 #endif
         return;
     }
-    std::this_thread::yield(); //FIXED
+    std::this_thread::yield();
 }
 
 uint32_t KeDelayExecutionThread(uint32_t waitMode, uint32_t alertable, const be<int64_t>* interval)

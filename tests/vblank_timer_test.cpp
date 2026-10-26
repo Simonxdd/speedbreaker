@@ -76,7 +76,7 @@ namespace
             for (unsigned i = 0; i < count; i++)
                 threads.emplace_back([this] {
 #ifdef __APPLE__
-                    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+                    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
 #endif
                     volatile uint64_t x = 0;
                     while (!stop.load(std::memory_order_relaxed))

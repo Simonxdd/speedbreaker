@@ -23,6 +23,7 @@
 #include <debug/timeline.h>
 #include <report/report.h>
 #include <unordered_set>
+#include "gpu/gpu_sync.h"
 
 namespace gpu
 {
@@ -828,10 +829,7 @@ namespace gpu
                     // or more to every wait. Spin with yields for 2 ms, then
                     // back off to short sleeps.
                     (void)wait;
-                    if (std::chrono::steady_clock::now() - waitStart < std::chrono::milliseconds(2))
-                        std::this_thread::yield();
-                    else
-                        std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
                 }
                 return true;
             }
@@ -901,6 +899,7 @@ namespace gpu
                 }
                 WriteRegister(REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
                 QueueStore(address, (initiator >> 31) & 1 ? s_counter.load() : value);
+                gpu_sync::NotifyGpuProgress();
                 return true;
             }
 
@@ -1120,7 +1119,6 @@ namespace gpu
             // The idle poll sleeps 100 us at a time; at the default QoS macOS
             // coalesces those timers into ~10 ms wake-ups, leaving the GPU
             // starved with recorded work pending.
-            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
             writewatch::t_gpuThread = true;
             renderer::t_commandProcessor = true;
@@ -1155,10 +1153,7 @@ namespace gpu
                         lastWork = std::chrono::steady_clock::now();
                         continue;
                     }
-                    if (std::chrono::steady_clock::now() - lastWork < std::chrono::milliseconds(2))
-                        std::this_thread::yield();
-                    else
-                        std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
                     continue;
                 }
                 s_regs[REG_CP_RB_WPTR] = writeIndex;

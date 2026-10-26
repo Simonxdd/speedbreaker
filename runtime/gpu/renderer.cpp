@@ -972,9 +972,6 @@ namespace gpu::renderer
 
         void CompletionThread()
         {
-#ifdef __APPLE__
-            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);  // see the command processor's Worker
-#endif
             writewatch::t_gpuThread = true;
             SetHostThreadName("nfsmw-gpu-done");
             hostcpu::LeaveReservedCore();  // started by the command processor
@@ -5125,9 +5122,6 @@ void main()
         {
             SetHostThreadName("nfsmw-shadowmap");
             hostcpu::LeaveReservedCore();  // started by the command processor
-#ifdef __APPLE__
-            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);  // (not the CP's interactive class)
-#endif
             // By 32x32 tiles: 32-bit texels make a tile 4 KB of consecutive
             // bytes (Tiled2D), so a tile wholly inside the rectangle is read
             // in order; the rest texel by texel.
@@ -9174,14 +9168,15 @@ void main()
                 wds.pImageInfo = &textureInfos[d * 32 + n];
             }
         if (writeCount)
+    {
+        bool same = !fresh && bound.textureLayout == layout.pipeline && bound.textureCount == writeCount;
+        for (uint32_t i = 0; same && i < writeCount; i++)  // (not memcmp: the struct has padding)
+            same = bound.textures[i].sampler == writes[i].pImageInfo->sampler &&
+                bound.textures[i].imageView == writes[i].pImageInfo->imageView &&
+                bound.textures[i].imageLayout == writes[i].pImageInfo->imageLayout;
+        if (!same)
         {
-            bool same = !fresh && bound.textureLayout == layout.pipeline && bound.textureCount == writeCount;
-            for (uint32_t i = 0; same && i < writeCount; i++)  // (not memcmp: the struct has padding)
-                same = bound.textures[i].sampler == writes[i].pImageInfo->sampler &&
-                    bound.textures[i].imageView == writes[i].pImageInfo->imageView &&
-                    bound.textures[i].imageLayout == writes[i].pImageInfo->imageLayout;
-            if (!same)
-            {
+            s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipeline, 1, writeCount, writes);
                 s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipeline, 1, writeCount, writes);
                 bound.textureLayout = layout.pipeline;
                 bound.textureCount = writeCount;

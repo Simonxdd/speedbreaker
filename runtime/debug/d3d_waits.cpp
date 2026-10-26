@@ -11,6 +11,9 @@
 #include <cpu/guest_time.h>
 #include <cpu/host_cpu.h>
 #include "timeline.h"
+#include <mutex>
+#include <condition_variable>
+#include "gpu/gpu_sync.h"
 
 extern "C" PPC_FUNC(__imp__sub_825A5B20);
 
@@ -26,28 +29,27 @@ namespace
     // processor's Worker). NFSMW_GPU_WAIT_BACKOFF=0 spins throughout.
     void BackOff()
     {
-#if defined(__linux__) || defined(__APPLE__)
-        static const bool backOff = [] { const char* v = std::getenv("NFSMW_GPU_WAIT_BACKOFF"); return !v || v[0] != '0'; }();
-        if (!backOff)
-            return;
+        guesttime::WaitWhileSuspended();
+
+        // Optional: Keep a tiny 20 microsecond aggressive spin grace period
+        // for ultra-fast GPU handoffs that complete almost instantly.
         using Clock = std::chrono::steady_clock;
         thread_local Clock::time_point lastPoll{}, waitStart{};
         auto now = Clock::now();
         if (now - lastPoll > std::chrono::microseconds(200))
-            waitStart = now;  // a new wait (one wait's polls are at most ~60 us apart)
+            waitStart = now;
         lastPoll = now;
         if (now - waitStart < std::chrono::microseconds(20))
             return;
-#ifdef __linux__
-        hostcpu::TightenTimerSlack();
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
-#elif defined(__APPLE__)
-        struct timespec req{ 0, 100'000 }; // 0.1 ms wakeups
-        nanosleep(&req, nullptr);
-#endif
-        lastPoll = Clock::now();
+
+#if defined(__APPLE__) || defined(__linux__)
+        // True Event-Driven Wait: Sleep until the GPU command processor
+        // notifies us of progress, or hit a 16ms safety timeout.
+        std::unique_lock<std::mutex> lock(gpu_sync::GetMutex());
+        gpu_sync::GetCV().wait_for(lock, std::chrono::milliseconds(16));
 #endif
 
+        lastPoll = Clock::now();
     }
 }
 

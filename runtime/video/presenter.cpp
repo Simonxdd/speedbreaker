@@ -574,7 +574,6 @@ namespace video
 #if defined(__APPLE__) && !TARGET_OS_IOS
             // As the threads that present (the main thread) and draw: it
             // takes MoltenVK's swapchain locks beside their presents.
-            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
             while (true)
             {
@@ -4257,6 +4256,17 @@ void main()
             int64_t grid = 0;
             if (HfrGrid(period, grid))
                 at = frameTarget - int64_t(std::llround(period)) + VblankLock::kHoldAfterRefreshNs;
+        }
+        if (at == 0)
+        {
+            static auto lastFrameTime = std::chrono::steady_clock::now();
+            auto targetDuration = std::chrono::milliseconds(16);
+            auto elapsed = std::chrono::steady_clock::now() - lastFrameTime;
+            if (elapsed < targetDuration)
+            {
+                std::this_thread::sleep_for(targetDuration - elapsed);
+            }
+            lastFrameTime = std::chrono::steady_clock::now();
         }
         if (at > ready && at - ready < 100'000'000)
         {

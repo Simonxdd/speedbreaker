@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <dlfcn.h>
+#include "gpu/gpu_sync.h"
 
 namespace writewatch
 {
@@ -1146,6 +1147,7 @@ namespace writewatch
     void SetCompleted(uint64_t submission)
     {
         s_completed.store(submission);
+        gpu_sync::NotifyGpuProgress();
     }
 
     void Quiesce()

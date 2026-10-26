@@ -458,10 +458,14 @@ int main(int argc, char** argv)
     // game runs in a container, not as the launcher's child, so Steam
     // stopping the launcher never reaches it: exit once the launcher is gone.
     if (const char* v = std::getenv("NFSMW_LIFELINE_PID"))
+    {
         if (pid_t lifeline = pid_t(std::atoi(v)); lifeline > 1)
+        {
             std::thread([lifeline] {
-                while (kill(lifeline, 0) == 0 || errno != ESRCH)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                // waitpid blocks natively in the kernel with 0 CPU overhead until the process dies
+                int status = 0;
+                while (waitpid(lifeline, &status, 0) == -1 && errno == EINTR);
+
                 fprintf(stderr, "[runtime] launcher (pid %d) is gone: exiting\n", int(lifeline));
                 if (settings::Dirty())
                     settings::Save();
@@ -470,6 +474,8 @@ int main(int argc, char** argv)
                 report::FlushLog();
                 std::_Exit(0);
             }).detach();
+        }
+    }
 
     std::filesystem::path xexPath;
     std::string gameOrigin;  // for the system summary
@@ -607,8 +613,24 @@ int main(int argc, char** argv)
     // iOS: the "needs a controller" notice, a few seconds into the game
     // (not over the installer).
     hid::NoteGameStarting();
-    while (video::RunFrame())
-        ;
+    auto frameInterval = std::chrono::milliseconds(16); // ~60 FPS
+
+    // Re-use or define a dummy mutex/cv for precise deadline waiting
+    std::mutex pacing_mutex;
+    std::condition_variable pacing_cv;
+
+    while (true)
+    {
+        auto frameStartTime = std::chrono::steady_clock::now();
+
+        if (!video::RunFrame())
+            break;
+
+        // Strict 60 FPS pacing floor using absolute-time CV wait instead of sleep_for
+        auto targetTime = frameStartTime + frameInterval;
+        std::unique_lock<std::mutex> lock(pacing_mutex);
+        pacing_cv.wait_until(lock, targetTime, [] { return false; }); // Sleeps until absolute deadline
+    }
     if (int sig = quitsignals::Requested())
         fprintf(stderr, "[runtime] %s: quitting, as the window's close button does\n", quitsignals::Name(sig));
     fprintf(stderr, "[runtime] window closed\n");

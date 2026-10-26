@@ -144,7 +144,6 @@ namespace
         // Every 5.3 ms, or the queue runs dry and the output crackles. At the
         // default QoS an iPhone (two performance cores, both busy with the
         // game and the command processor) ran it late on an efficiency core.
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
         GuestThreadContext ctx(0);
         SetHostThreadName("nfsmw-audio");
