@@ -1,6 +1,7 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See frame_rate.h.
 #include "frame_rate.h"
 
+#include <hid/input.h>
 #include <platform/thermal.h>
 #include <report/report.h>
 #include <ui/ui.h>
@@ -21,6 +22,12 @@ namespace video
         // Frame Rate changed (the menu, a reload): Auto starts over at 60.
         std::atomic<bool> s_restart{ true };
         AutoFrameRatePolicy s_policy;  // command processor thread
+        // No control touched for kIdleSeconds: Auto shows 30 (nobody is
+        // steering, so 60 is power for nothing); any input ends it at once.
+        // Whatever Auto had chosen waits in s_rate, and the policy starts over
+        // when the input is back (its window would be 30 fps frames).
+        std::atomic<bool> s_idle{ false };
+        constexpr double kIdleSeconds = 25.0;
 
         const bool s_log = [] {
             const char* v = std::getenv("NFSMW_AUTO_FPS_LOG");
@@ -91,7 +98,9 @@ namespace video
     int FrameRate()
     {
         int32_t setting = settings::GetInt(settings::Id::FrameRate);
-        return setting == settings::kFrameRateAuto ? s_rate.load(std::memory_order_relaxed) : setting;
+        if (setting != settings::kFrameRateAuto)
+            return setting;
+        return s_idle.load(std::memory_order_relaxed) ? 30 : s_rate.load(std::memory_order_relaxed);
     }
 
     void NoteFrameCosts(const FrameSample& sample)
@@ -106,10 +115,25 @@ namespace video
             const bool hot = thermal == platform::thermal::State::Serious || thermal == platform::thermal::State::Critical;
             s_rate.store(hot ? 30 : 60, std::memory_order_relaxed);
             s_reason.store(hot ? FrameRateReason::Hot : FrameRateReason::None, std::memory_order_relaxed);
+            s_idle.store(false, std::memory_order_relaxed);
             s_restart.store(true, std::memory_order_release);
         });
         (void)listener;
         if (!AutoOn())
+            return;
+        // Idle: 30 until a control is used. The policy isn't fed meanwhile: it
+        // would read the 30 fps it didn't choose as a 60 it can't hold.
+        const bool idle = hid::SecondsSinceInput() >= kIdleSeconds;
+        if (idle != s_idle.load(std::memory_order_relaxed))
+        {
+            s_idle.store(idle, std::memory_order_relaxed);
+            if (!idle)
+                s_restart.store(true, std::memory_order_release);
+            if (s_log)
+                fprintf(stderr, "[frame rate] auto %s at %.1f s: %s\n", idle ? "30" : "back to Auto's rate",
+                    report::SessionSeconds(), idle ? "no input for 30 s" : "input");
+        }
+        if (idle)
             return;
         if (s_restart.exchange(false, std::memory_order_acquire))
             s_policy.Reset();
@@ -137,6 +161,8 @@ namespace video
     {
         if (!AutoOn())
             return "";
+        if (s_idle.load(std::memory_order_relaxed))
+            return "Now 30 fps: no input.";
         if (s_rate.load(std::memory_order_relaxed) == 60)
             return "Now 60 fps.";
         return s_reason.load(std::memory_order_relaxed) == FrameRateReason::Hot ? "Now 30 fps: the device is warm."
@@ -145,6 +171,7 @@ namespace video
 
     std::string AutoFrameRatePerfText()
     {
-        return AutoOn() ? std::format(" | auto {} fps", s_rate.load(std::memory_order_relaxed)) : std::string();
+        return AutoOn() ? std::format(" | auto {} fps{}", FrameRate(), s_idle.load(std::memory_order_relaxed) ? " (idle)" : "")
+                        : std::string();
     }
 }

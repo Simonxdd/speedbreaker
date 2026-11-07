@@ -147,6 +147,15 @@ namespace
     bool s_scriptSuppressed = false;  // under s_mutex: no scripted input while a menu is open
     std::chrono::steady_clock::time_point s_lastInput;  // main thread: a control last in use (SecondsSinceInput)
     bool s_inputSeen = false;
+    // The same instant as s_lastInput, as steady_clock ns (0: none yet), for
+    // threads other than the main one (video::NoteFrameCosts' idle rule).
+    std::atomic<int64_t> s_lastInputNs{ 0 };
+    void NoteInputNow()
+    {
+        s_lastInput = std::chrono::steady_clock::now();
+        s_inputSeen = true;
+        s_lastInputNs.store(s_lastInput.time_since_epoch().count(), std::memory_order_relaxed);
+    }
     hid::wheelmap::WheelStill s_wheelStill;  // main thread: a wheel's steering counts when it turns (wheel_map.h)
 
     // The controller's Back is held back from the game until it's clear it
@@ -972,8 +981,7 @@ namespace
             }
             if (user && (p.buttons || p.leftTrigger || p.rightTrigger || p.lx || p.ly || p.rx || p.ry))
             {
-                s_lastInput = std::chrono::steady_clock::now();
-                s_inputSeen = true;
+                NoteInputNow();
             }
             // A menu of ours open: the game sees idle pads, and after it
             // closes each button held stays hidden until released (Update's
@@ -1138,11 +1146,14 @@ namespace hid
             ou.rumbleDirty = true;
     }
 
+    // Any thread.
     double SecondsSinceInput()
     {
-        if (!s_inputSeen)
+        const int64_t last = s_lastInputNs.load(std::memory_order_relaxed);
+        if (last == 0)
             return 0.0;
-        return std::chrono::duration<double>(std::chrono::steady_clock::now() - s_lastInput).count();
+        return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch() -
+                                             std::chrono::steady_clock::duration(last)).count();
     }
 
     void SetBlocked(bool blocked)
@@ -1263,8 +1274,7 @@ namespace hid
             if (scripted.buttons || scripted.leftTrigger || scripted.rightTrigger || scripted.lx || scripted.ly || scripted.rx ||
                 scripted.ry || !s_inputSeen)
             {
-                s_lastInput = std::chrono::steady_clock::now();
-                s_inputSeen = true;
+                NoteInputNow();
             }
         }
 
