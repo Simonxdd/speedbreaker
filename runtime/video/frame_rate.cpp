@@ -27,7 +27,7 @@ namespace video
         // Whatever Auto had chosen waits in s_rate, and the policy starts over
         // when the input is back (its window would be 30 fps frames).
         std::atomic<bool> s_idle{ false };
-        constexpr double kIdleSeconds = 25.0;
+        constexpr double kIdleSeconds = 180.0;
 
         const bool s_log = [] {
             const char* v = std::getenv("NFSMW_AUTO_FPS_LOG");
@@ -131,7 +131,7 @@ namespace video
                 s_restart.store(true, std::memory_order_release);
             if (s_log)
                 fprintf(stderr, "[frame rate] auto %s at %.1f s: %s\n", idle ? "30" : "back to Auto's rate",
-                    report::SessionSeconds(), idle ? "no input for 30 s" : "input");
+                    report::SessionSeconds(), idle ? "no input for 180 s" : "input");
         }
         if (idle)
             return;
